@@ -9,17 +9,17 @@ import (
 )
 
 func main() {
-	fmt.Println("[*] Inicializando simulador avanzado de Deadlock: StrongBox / citadeld...")
+	fmt.Println("[*] Simulando Binder death y deadlock de SPI en citadeld / keystore2...")
 	
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var timeouts int64
-	workers := 4
+	var activeDeadlock int32
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	for i := 1; i <= workers; i++ {
+	for i := 1; i <= 3; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -28,18 +28,27 @@ func main() {
 				case <-ctx.Done():
 					return
 				default:
-					locked := tryLockWithTimeout(&mu, 100*time.Millisecond)
+					if atomic.LoadInt32(&activeDeadlock) == 1 {
+						time.Sleep(100 * time.Millisecond)
+						atomic.AddInt64(&timeouts, 1)
+						continue
+					}
+
+					locked := tryLockWithTimeout(&mu, 150*time.Millisecond)
 					if !locked {
 						atomic.AddInt64(&timeouts, 1)
 						continue
 					}
 
-					// Simular carga pesada o bloqueo en hilo específico
-					if id == 2 {
-						time.Sleep(800 * time.Millisecond)
-					} else {
-						time.Sleep(50 * time.Millisecond)
+					// Simular que el proceso cliente muere abruptamente a mitad de operacion SPI
+					if id == 3 {
+						fmt.Printf("[!] ¡ALERTA: Hilo %d (Client) murio abruptamente con el bus SPI bloqueado!\n", id)
+						atomic.StoreInt32(&activeDeadlock, 1)
+						// El mutex se queda atrapado (no se hace unlock), simulando el freeze de citadeld
+						return 
 					}
+
+					time.Sleep(60 * time.Millisecond)
 					mu.Unlock()
 				}
 			}
@@ -47,7 +56,7 @@ func main() {
 	}
 
 	wg.Wait()
-	fmt.Printf("[+] Simulación finalizada. Total de timeouts / bloqueos SPI detectados: %d\n", atomic.LoadInt64(&timeouts))
+	fmt.Printf("[+] Simulación de colapso finalizada. Total de bloqueos / timeouts en keystore2: %d\n", atomic.LoadInt64(&timeouts))
 }
 
 func tryLockWithTimeout(mu *sync.Mutex, timeout time.Duration) bool {
@@ -56,7 +65,6 @@ func tryLockWithTimeout(mu *sync.Mutex, timeout time.Duration) bool {
 		mu.Lock()
 		ch <- struct{}{}
 	}()
-
 	select {
 	case <-ch:
 		return true
